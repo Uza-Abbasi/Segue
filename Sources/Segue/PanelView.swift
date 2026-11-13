@@ -10,6 +10,7 @@ struct PanelView: View {
             Text(model.title)
                 .font(.headline)
                 .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
 
             HStack {
                 Button(action: model.djSkip) {

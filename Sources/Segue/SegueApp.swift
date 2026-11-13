@@ -109,7 +109,6 @@ struct SegueApp: App {
         } label: {
             // The symbol changes as well as pulsing: menu bar items don't always animate effects.
             Image(systemName: model.isTransitioning ? "waveform.path" : "waveform")
-                .symbolEffect(.pulse, isActive: model.isTransitioning)
         }
         .menuBarExtraStyle(.window)
     }
