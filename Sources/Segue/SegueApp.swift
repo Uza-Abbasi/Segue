@@ -107,7 +107,7 @@ struct SegueApp: App {
         MenuBarExtra {
             PanelView(model: model, settings: model.settings)
         } label: {
-            // The symbol changes as well as pulsing: menu bar items don't always animate effects.
+            // The symbol changes during a transition. A symbol effect here stops the item appearing at all.
             Image(systemName: model.isTransitioning ? "waveform.path" : "waveform")
         }
         .menuBarExtraStyle(.window)
@@ -133,6 +133,8 @@ final class AppModel: ObservableObject {
     private let hotkeys = HotkeyManager()
     private var timer: Timer?
     private var keyMonitor: Any?
+    private var refreshing = false
+    private var musicWasReachable = false
 
     init() {
         engine = TransitionEngine(music: music, eq: equalizer,
@@ -147,14 +149,17 @@ final class AppModel: ObservableObject {
         }
         // Ask for permission to control Music up front, off the main thread because the prompt blocks.
         Task { [weak self] in
-            let allowed = await Task.detached { music.automationAllowed(prompt: true) }.value
-            self?.canControlMusic = allowed ?? true
+            _ = await Task.detached { music.automationStatus(prompt: true) }.value
+            self?.refresh()
         }
         registerHotkeys()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
-        refresh()
+        NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification,
+                                               object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.cancelRecording() }
+        }
     }
 
     func djSkip() {
@@ -171,14 +176,32 @@ final class AppModel: ObservableObject {
         AXEqualizerController.requestAccessibilityPermission()
     }
 
+    /// Reads Music's state on a background thread, so a slow Music can't freeze the panel or the shortcuts.
     private func refresh() {
         hasAccessibility = AXEqualizerController.hasAccessibilityPermission
-        canControlMusic = music.automationAllowed(prompt: false) ?? true
-        isPlaying = music.playerState() == .playing
-        if let track = music.trackTitle() {
-            title = track.artist.isEmpty ? track.name : "\(track.name) — \(track.artist)"
-        } else {
-            title = music.isRunning ? "Not playing" : "Music isn't open"
+        guard !refreshing else { return }
+        refreshing = true
+        let music = music, engine = engine, wasReachable = musicWasReachable
+        Task { [weak self] in
+            let read = await Task.detached { () -> (OSStatus?, Bool, PlayerState, (name: String, artist: String)?) in
+                let status = music.automationStatus(prompt: false)
+                // No events until macOS has said yes: one sent earlier would raise the consent prompt.
+                guard status == noErr else { return (status, music.isRunning, .stopped, nil) }
+                // Music has just become reachable: put back anything an unfinished transition left.
+                if !wasReachable { await engine.recoverIfNeeded() }
+                return (status, true, music.playerState(), music.trackTitle())
+            }.value
+            guard let self else { return }
+            let (status, running, state, track) = read
+            self.refreshing = false
+            self.musicWasReachable = status == noErr
+            self.canControlMusic = status != OSStatus(errAEEventNotPermitted)
+            self.isPlaying = state == .playing
+            if let track {
+                self.title = track.artist.isEmpty ? track.name : "\(track.name) — \(track.artist)"
+            } else {
+                self.title = running ? "Not playing" : "Music isn't open"
+            }
         }
     }
 
@@ -213,9 +236,12 @@ final class AppModel: ObservableObject {
         stopRecording()
         let old = (settings.skipShortcut, settings.pauseShortcut)
         let other = role == .skip ? settings.pauseShortcut : settings.skipShortcut
-        if shortcut.keyCode != other.keyCode || shortcut.modifiers != other.modifiers {
-            if role == .skip { settings.skipShortcut = shortcut } else { settings.pauseShortcut = shortcut }
+        guard shortcut.keyCode != other.keyCode || shortcut.modifiers != other.modifiers else {
+            registerHotkeys()
+            shortcutError = "\(shortcut.display) is already the other shortcut. The shortcut was not changed."
+            return
         }
+        if role == .skip { settings.skipShortcut = shortcut } else { settings.pauseShortcut = shortcut }
         registerHotkeys()
         if shortcutError != nil {
             // Refused: go back to the shortcuts that worked.
@@ -223,6 +249,13 @@ final class AppModel: ObservableObject {
             registerHotkeys()
             shortcutError = "\(shortcut.display) is unavailable. The shortcut was not changed."
         }
+    }
+
+    /// Ends a recording that was never finished, so the shortcuts work again.
+    func cancelRecording() {
+        guard recording != nil else { return }
+        stopRecording()
+        registerHotkeys()
     }
 
     private func stopRecording() {

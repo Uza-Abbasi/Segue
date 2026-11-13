@@ -24,43 +24,49 @@ extension SBObject: MusicTrack {}
 extension SBApplication: MusicApplication {}
 
 /// Controls the Music app through Apple Events. Never launches Music.
+/// Calls block until Music answers, so keep them off the main thread.
 final class MusicAppController: MusicControlling, @unchecked Sendable {
     static let bundleID = "com.apple.Music"
     private static let playing: AEKeyword = 0x6B50_5350   // 'kPSP'
     private static let paused: AEKeyword = 0x6B50_5370    // 'kPSp'
+    /// In ticks (1/60 s). The default is about two minutes, which would hang Segue if Music stalls.
+    private static let eventTimeout = 120
 
-    private let lock = NSLock()
+    /// One event at a time: the engine and the panel's refresh share this object.
+    private let lock = NSRecursiveLock()
     private var cached: SBApplication?
 
     var isRunning: Bool {
         !NSRunningApplication.runningApplications(withBundleIdentifier: Self.bundleID).isEmpty
     }
 
-    /// Nil unless Music is already running, so a call can never launch it.
-    private var app: MusicApplication? {
-        guard isRunning else { return nil }
+    /// Runs `body` against Music. Nil if Music isn't already running, so a call can never launch it.
+    private func withApp<T>(_ body: (MusicApplication) -> T?) -> T? {
         lock.lock()
         defer { lock.unlock() }
-        if cached == nil { cached = SBApplication(bundleIdentifier: Self.bundleID) }
-        return cached
+        guard isRunning else { return nil }
+        if cached == nil {
+            cached = SBApplication(bundleIdentifier: Self.bundleID)
+            cached?.timeout = Self.eventTimeout
+        }
+        return cached.flatMap(body)
     }
 
-    /// Whether macOS lets Segue control Music. Nil while Music isn't running.
-    /// With `prompt`, macOS asks the user the first time; that call can block, so keep it off the main thread.
-    func automationAllowed(prompt: Bool) -> Bool? {
+    /// macOS's answer on whether Segue may control Music: `noErr` when allowed, -1743 when
+    /// refused, -1744 when the user hasn't been asked. Nil while Music isn't running.
+    /// With `prompt`, macOS asks the first time, and the call blocks until the user answers.
+    func automationStatus(prompt: Bool) -> OSStatus? {
         guard isRunning else { return nil }
         var target = AEAddressDesc()
         let id = Array(Self.bundleID.utf8)
         guard AECreateDesc(typeApplicationBundleID, id, id.count, &target) == noErr else { return nil }
         defer { AEDisposeDesc(&target) }
         let status = AEDeterminePermissionToAutomateTarget(&target, typeWildCard, typeWildCard, prompt)
-        if status == OSStatus(procNotFound) { return nil }
-        // -1744: the user hasn't been asked yet. Treat it as not yet refused.
-        return status == noErr || status == -1744
+        return status == OSStatus(procNotFound) ? nil : status
     }
 
     func playerState() -> PlayerState {
-        switch app?.playerState {
+        switch withApp({ $0.playerState }) {
         case Self.playing: return .playing
         case Self.paused: return .paused
         default: return .stopped
@@ -68,21 +74,27 @@ final class MusicAppController: MusicControlling, @unchecked Sendable {
     }
 
     func trackTitle() -> (name: String, artist: String)? {
-        guard let track = app?.currentTrack, let name = track.name, !name.isEmpty else { return nil }
-        return (name, track.artist ?? "")
+        withApp { app in
+            guard let track = app.currentTrack, let name = track.name, !name.isEmpty else { return nil }
+            return (name, track.artist ?? "")
+        }
     }
 
     func trackKey() -> String? {
-        guard let track = app?.currentTrack, let name = track.name, !name.isEmpty else { return nil }
-        return "\(track.persistentID ?? "")|\(name)|\(track.artist ?? "")|\(Int(track.duration ?? 0))"
+        withApp { app in
+            guard let track = app.currentTrack, let name = track.name, !name.isEmpty else { return nil }
+            return "\(track.persistentID ?? "")|\(name)|\(track.artist ?? "")|\(Int(track.duration ?? 0))"
+        }
     }
 
-    func volume() -> Int? { app?.soundVolume }
-    func setVolume(_ v: Int) { app?.setSoundVolume?(min(max(v, 0), 100)) }
-    func nextTrack() { app?.nextTrack?() }
-    func pause() { app?.pause?() }
+    func volume() -> Int? { withApp { $0.soundVolume } }
+    func setVolume(_ v: Int) { _ = withApp { $0.setSoundVolume?(min(max(v, 0), 100)) } }
+    func nextTrack() { _ = withApp { $0.nextTrack?() } }
+    func pause() { _ = withApp { $0.pause?() } }
     func play() {
-        guard let app, playerState() != .playing else { return }
-        app.playpause?()
+        _ = withApp { app -> Void? in
+            guard app.playerState != Self.playing else { return nil }
+            return app.playpause?()
+        }
     }
 }

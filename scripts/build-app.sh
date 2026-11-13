@@ -29,8 +29,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-if security find-identity -p codesigning | grep -q "$IDENTITY"; then
-    codesign --force --sign "$IDENTITY" "$APP"
+IDENTITIES="$(security find-identity -p codesigning 2>/dev/null || true)"
+if [[ "$IDENTITIES" == *"$IDENTITY"* ]] && codesign --force --sign "$IDENTITY" "$APP" 2>/dev/null; then
     echo "Signed with \"$IDENTITY\"."
 else
     codesign --force --sign - "$APP"

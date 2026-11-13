@@ -2,7 +2,7 @@
 
 A macOS menu bar app that makes skipping a song in Apple Music sound like a DJ transition.
 
-Press a shortcut and, instead of cutting the song off, Segue fades it out while sweeping the equalizer, skips, and fades the next song in. Each skip uses a different combination of fade and filter, so no two sound the same. Afterwards your volume and equalizer are exactly as you left them.
+Press a shortcut and, instead of cutting the song off, Segue fades it out while sweeping the equalizer, skips, and fades the next song in. Each skip uses a different combination of fade and filter, so no two sound the same. Afterwards your volume and equalizer go back to how you left them.
 
 This is a personal proof of concept. It is a rough beta.
 
@@ -13,7 +13,7 @@ This is a personal proof of concept. It is a rough beta.
 Segue never touches the audio. It remote-controls the Music app that is already playing:
 
 - **Volume, skip, play and pause** go through Music's scripting interface.
-- **The filter sweep** moves the sliders in Music's own Equalizer window through the macOS Accessibility API. Segue opens that window from Music's menu and keeps it minimized in the Dock.
+- **The filter sweep** moves the sliders in Music's own Equalizer window through the macOS Accessibility API. Segue opens that window from Music's menu and minimizes it to the Dock. If you already have it open, Segue leaves it where it is.
 
 Each DJ skip picks a "recipe" at random:
 
@@ -52,6 +52,8 @@ The build is signed ad hoc by default, which means macOS asks for Segue's permis
 ./scripts/make-signing-cert.sh
 ```
 
+That script has not been tested end to end yet. If it fails, the ad hoc build still works.
+
 ## Permissions
 
 Segue asks for two permissions:
@@ -82,6 +84,10 @@ Settings in the panel: shortest and longest transition, vary each transition, eq
 - The equalizer sweep depends on the layout of Music's Equalizer window, so a macOS update that changes that window may break it. Skips then fall back to a plain fade.
 - Music's equalizer only cuts a band by 12 dB, so the filter is gentler than a DJ mixer's.
 - After a skip from a named equalizer preset, Music takes about half a second to slide back to that preset.
+- The equalizer sweep expects macOS in English: it finds Music's Equalizer controls by their English names. In another language, skips fall back to a plain fade.
+- If the Equalizer can't be reached when a skip ends, Segue puts it back before the next skip or pause instead.
+- While the screen is locked, macOS hides Music's windows from Segue, so skips fade without the equalizer.
+- The menu bar icon changes shape during a transition; it doesn't animate.
 - "Start at login" only works from the packaged app, and may need the local signing certificate.
 
 ## Roadmap

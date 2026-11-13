@@ -57,6 +57,7 @@ struct PanelView: View {
         .controlSize(.small)
         .padding(14)
         .frame(width: 320)
+        .onDisappear(perform: model.cancelRecording)
         .onChange(of: settings.transition.minLength) { _, new in
             if new > settings.transition.maxLength { settings.transition.maxLength = new }
         }
