@@ -45,6 +45,20 @@ final class MusicAppController: MusicControlling, @unchecked Sendable {
         return cached
     }
 
+    /// Whether macOS lets Segue control Music. Nil while Music isn't running.
+    /// With `prompt`, macOS asks the user the first time; that call can block, so keep it off the main thread.
+    func automationAllowed(prompt: Bool) -> Bool? {
+        guard isRunning else { return nil }
+        var target = AEAddressDesc()
+        let id = Array(Self.bundleID.utf8)
+        guard AECreateDesc(typeApplicationBundleID, id, id.count, &target) == noErr else { return nil }
+        defer { AEDisposeDesc(&target) }
+        let status = AEDeterminePermissionToAutomateTarget(&target, typeWildCard, typeWildCard, prompt)
+        if status == OSStatus(procNotFound) { return nil }
+        // -1744: the user hasn't been asked yet. Treat it as not yet refused.
+        return status == noErr || status == -1744
+    }
+
     func playerState() -> PlayerState {
         switch app?.playerState {
         case Self.playing: return .playing

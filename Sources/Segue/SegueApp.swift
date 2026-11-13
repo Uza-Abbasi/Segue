@@ -1,5 +1,6 @@
-import Foundation
+import AppKit
 import SegueCore
+import SwiftUI
 
 @main
 struct SegueMain {
@@ -12,7 +13,7 @@ struct SegueMain {
             Probe.run()
             return
         }
-        print("Segue")
+        SegueApp.main()
     }
 }
 
@@ -96,5 +97,138 @@ enum Probe {
         } catch {
             print("error: \(error)")
         }
+    }
+}
+
+struct SegueApp: App {
+    @StateObject private var model = AppModel()
+
+    var body: some Scene {
+        MenuBarExtra {
+            PanelView(model: model, settings: model.settings)
+        } label: {
+            // The symbol changes as well as pulsing: menu bar items don't always animate effects.
+            Image(systemName: model.isTransitioning ? "waveform.path" : "waveform")
+                .symbolEffect(.pulse, isActive: model.isTransitioning)
+        }
+        .menuBarExtraStyle(.window)
+    }
+}
+
+@MainActor
+final class AppModel: ObservableObject {
+    @Published var title = "Not playing"
+    @Published var isPlaying = false
+    @Published var isTransitioning = false
+    @Published var hasAccessibility = AXEqualizerController.hasAccessibilityPermission
+    @Published var canControlMusic = true
+    @Published var shortcutError: String?
+    @Published var recording: ShortcutRole?
+
+    enum ShortcutRole { case skip, pause }
+
+    let settings = SettingsStore()
+    private let music = MusicAppController()
+    private let equalizer = AXEqualizerController()
+    private let engine: TransitionEngine
+    private let hotkeys = HotkeyManager()
+    private var timer: Timer?
+    private var keyMonitor: Any?
+
+    init() {
+        engine = TransitionEngine(music: music, eq: equalizer,
+                                  store: SnapshotStore(directory: SnapshotStore.defaultDirectory),
+                                  clock: SystemClock())
+        let engine = engine, music = music
+        Task {
+            await engine.setRunningHandler { [weak self] running in
+                Task { @MainActor in self?.isTransitioning = running }
+            }
+            await engine.recoverIfNeeded()
+        }
+        // Ask for permission to control Music up front, off the main thread because the prompt blocks.
+        Task { [weak self] in
+            let allowed = await Task.detached { music.automationAllowed(prompt: true) }.value
+            self?.canControlMusic = allowed ?? true
+        }
+        registerHotkeys()
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refresh() }
+        }
+        refresh()
+    }
+
+    func djSkip() {
+        let s = settings.transition
+        Task { await engine.djSkip(settings: s) }
+    }
+
+    func togglePause() {
+        let s = settings.transition
+        Task { await engine.togglePause(settings: s) }
+    }
+
+    func grantAccessibility() {
+        AXEqualizerController.requestAccessibilityPermission()
+    }
+
+    private func refresh() {
+        hasAccessibility = AXEqualizerController.hasAccessibilityPermission
+        canControlMusic = music.automationAllowed(prompt: false) ?? true
+        isPlaying = music.playerState() == .playing
+        if let track = music.trackTitle() {
+            title = track.artist.isEmpty ? track.name : "\(track.name) — \(track.artist)"
+        } else {
+            title = music.isRunning ? "Not playing" : "Music isn't open"
+        }
+    }
+
+    // MARK: - Shortcuts
+
+    private func registerHotkeys() {
+        hotkeys.unregisterAll()
+        let skipOK = hotkeys.register(settings.skipShortcut, id: 1) { [weak self] in self?.djSkip() }
+        let pauseOK = hotkeys.register(settings.pauseShortcut, id: 2) { [weak self] in self?.togglePause() }
+        shortcutError = skipOK && pauseOK ? nil : "A shortcut is in use by another app. Pick a different one."
+    }
+
+    /// Captures the next key press that includes ⌃, ⌥ or ⌘ as the new shortcut. Esc cancels.
+    func record(_ role: ShortcutRole) {
+        stopRecording()
+        recording = role
+        hotkeys.unregisterAll()
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            if event.keyCode == 53 {
+                self.stopRecording()
+                self.registerHotkeys()
+                return nil
+            }
+            guard let shortcut = Shortcut(event: event) else { return nil }
+            self.assign(shortcut, to: role)
+            return nil
+        }
+    }
+
+    private func assign(_ shortcut: Shortcut, to role: ShortcutRole) {
+        stopRecording()
+        let old = (settings.skipShortcut, settings.pauseShortcut)
+        let other = role == .skip ? settings.pauseShortcut : settings.skipShortcut
+        if shortcut.keyCode != other.keyCode || shortcut.modifiers != other.modifiers {
+            if role == .skip { settings.skipShortcut = shortcut } else { settings.pauseShortcut = shortcut }
+        }
+        registerHotkeys()
+        if shortcutError != nil {
+            // Refused: go back to the shortcuts that worked.
+            (settings.skipShortcut, settings.pauseShortcut) = old
+            registerHotkeys()
+            shortcutError = "\(shortcut.display) is unavailable. The shortcut was not changed."
+        }
+    }
+
+    private func stopRecording() {
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        keyMonitor = nil
+        recording = nil
     }
 }

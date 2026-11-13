@@ -39,7 +39,7 @@ public struct Recipe: Equatable, Sendable {
     }
 }
 
-public struct TransitionSettings: Equatable, Sendable {
+public struct TransitionSettings: Codable, Equatable, Sendable {
     public var minLength = 3.0
     public var maxLength = 8.0
     public var variation = true
