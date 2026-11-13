@@ -98,7 +98,85 @@ import Testing
     #expect(rig.music.nextCount == 1)
     #expect(rig.music.vol == 80)
     #expect(rig.eq.setBandsCalls == 10)
-    #expect(rig.eq.restoreCalls == 1)
+}
+
+@Test func eqIsRestoredAfterAFailureOnceItsControlsAreFoundAgain() async {
+    let rig = Rig()
+    rig.eq.current = rock
+    rig.eq.failAfterSetBandsCalls = 10
+    rig.clock.at(1.0) { rig.eq.failAfterSetBandsCalls = nil }   // window comes back
+    await rig.engine.djSkip(settings: fixedSettings)
+    #expect(rig.eq.current == rock)
+    #expect(rig.store.load() == nil)
+}
+
+@Test func eqThatCannotBeRestoredStaysOnDiskUntilItCan() async {
+    let rig = Rig()
+    rig.eq.current = rock
+    rig.eq.failAfterSetBandsCalls = 10
+    rig.clock.at(1.0) { rig.eq.available = false }              // window gone for good
+    await rig.engine.djSkip(settings: fixedSettings)
+    #expect(rig.music.vol == 80)
+    #expect(rig.store.load() == StateSnapshot(volume: nil, eq: rock))
+
+    rig.eq.available = true
+    rig.eq.failAfterSetBandsCalls = nil
+    rig.music.vol = 30                                          // the user's own later change
+    await rig.engine.recoverIfNeeded()
+    #expect(rig.eq.current == rock)
+    #expect(rig.music.vol == 30)
+    #expect(rig.store.load() == nil)
+}
+
+@Test func nextSkipAfterMusicComesBackRestoresFirst() async {
+    let rig = Rig()
+    rig.eq.current = rock
+    rig.clock.at(2.0) { rig.music.running = false }
+    await rig.engine.djSkip(settings: fixedSettings)
+    #expect(rig.music.vol < 80)
+
+    rig.music.running = true
+    rig.music.state = .paused
+    await rig.engine.djSkip(settings: fixedSettings)            // plain skip while paused
+    #expect(rig.music.vol == 80)
+    #expect(rig.eq.current == rock)
+    #expect(rig.store.load() == nil)
+}
+
+@Test func recoverKeepsTheEQWhenItIsNotReachableYet() async {
+    let rig = Rig()
+    rig.eq.available = false
+    rig.store.save(StateSnapshot(volume: 70, eq: rock))
+    await rig.engine.recoverIfNeeded()
+    #expect(rig.music.vol == 70)
+    #expect(rig.store.load() == StateSnapshot(volume: nil, eq: rock))
+}
+
+@Test func oneFailedVolumeReadDoesNotStrandTheVolume() async {
+    let rig = Rig()
+    rig.clock.at(2.0) { rig.music.failVolumeReads = 1 }
+    rig.clock.at(6.0) { rig.music.failVolumeReads = 1 }         // and once during the fade-in
+    await rig.engine.djSkip(settings: fixedSettings)
+    #expect(rig.music.nextCount == 1)
+    #expect(rig.music.vol == 80)
+}
+
+@Test func unreadableVolumeAtTheStartIsAPlainSkip() async {
+    let rig = Rig()
+    rig.music.failVolumeReads = 1
+    await rig.engine.djSkip(settings: fixedSettings)
+    #expect(rig.music.log == ["next"])
+    #expect(rig.store.load() == nil)
+}
+
+@Test func skipAfterAnAbortedTransitionIsNotSearchMode() async {
+    let rig = Rig()
+    rig.clock.at(2.0) { rig.music.key = "other" }
+    await rig.engine.djSkip(settings: fixedSettings)            // aborted: the song changed
+    rig.clock.advance(1)
+    let sweepsBefore = rig.eq.setBandsCalls
+    await rig.engine.djSkip(settings: fixedSettings)
+    #expect(rig.eq.setBandsCalls > sweepsBefore + 100)
 }
 
 @Test func musicQuitsMidTransition() async {

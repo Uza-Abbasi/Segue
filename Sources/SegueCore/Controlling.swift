@@ -19,10 +19,11 @@ public struct EQSnapshot: Codable, Equatable, Sendable {
 
 /// What a transition changes and must put back.
 public struct StateSnapshot: Codable, Equatable, Sendable {
-    public var volume: Int
+    /// Nil when only the EQ is still waiting to be put back.
+    public var volume: Int?
     public var eq: EQSnapshot?
 
-    public init(volume: Int, eq: EQSnapshot?) {
+    public init(volume: Int?, eq: EQSnapshot?) {
         self.volume = volume
         self.eq = eq
     }
@@ -34,8 +35,8 @@ public protocol MusicControlling: Sendable {
     /// Stable identity of the current track, nil if there is none.
     func trackKey() -> String?
     func trackTitle() -> (name: String, artist: String)?
-    /// 0...100
-    func volume() -> Int
+    /// 0...100, or nil if Music didn't answer.
+    func volume() -> Int?
     func setVolume(_ v: Int)
     func nextTrack()
     func play()

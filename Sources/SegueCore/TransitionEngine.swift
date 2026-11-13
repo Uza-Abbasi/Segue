@@ -30,11 +30,14 @@ public actor TransitionEngine {
     private var lastTransitionEnd = -Double.infinity
 
     /// State of the transition in flight.
-    private var saved = StateSnapshot(volume: 0, eq: nil)
+    private var savedVolume = 0
+    private var savedEQ: EQSnapshot?
     private var interrupt: Interrupt?
-    private var volumeManaged = true
-    private var recentVolumes: [Int] = []
     private var isSkip = true
+    private var didSkip = false
+    private var volumeManaged = true
+    private var volumeMismatches = 0
+    private var recentVolumes: [Int] = []
 
     public init(music: MusicControlling, eq: EqualizerControlling, store: SnapshotStore,
                 clock: EngineClock, rng: any RandomNumberGenerator = SystemRandomNumberGenerator()) {
@@ -50,38 +53,15 @@ public actor TransitionEngine {
     }
 
     /// Restores volume and EQ from a snapshot left behind by a transition that never finished.
+    /// Whatever can't be put back yet stays on disk for the next attempt.
     public func recoverIfNeeded() {
         guard !isRunning, music.isRunning, let snapshot = store.load() else { return }
-        music.setVolume(snapshot.volume)
-        if let eqSnapshot = snapshot.eq, eq.prepare() { try? eq.restore(eqSnapshot) }
-        store.clear()
-    }
-
-    public func togglePause(settings: TransitionSettings) async {
-        guard music.isRunning else { return }
-        if isRunning {
-            interrupt = .cancelAndPause
-            return
-        }
-        let state = music.playerState()
-        guard settings.fadeOnPause, state != .stopped else {
-            if state == .playing { music.pause() } else { music.play() }
-            return
-        }
-
-        // Pause fades are too short to be worth a snapshot on disk.
-        begin(StateSnapshot(volume: music.volume(), eq: nil), isSkip: false)
-        if state == .playing {
-            await fadeVolume(from: saved.volume, to: 0, over: TransitionSettings.pauseFade)
-            if let stop = stopReason() { return handle(stop) }
-            music.pause()
+        if let volume = snapshot.volume { music.setVolume(volume) }
+        if let eqSnapshot = snapshot.eq, !restore(eqSnapshot) {
+            store.save(StateSnapshot(volume: nil, eq: eqSnapshot))
         } else {
-            writeVolume(0)
-            music.play()
-            await fadeVolume(from: 0, to: saved.volume, over: TransitionSettings.pauseFade)
-            if let stop = stopReason() { return handle(stop) }
+            store.clear()
         }
-        finish()
     }
 
     public func djSkip(settings: TransitionSettings) async {
@@ -90,7 +70,8 @@ public actor TransitionEngine {
             interrupt = .skip
             return
         }
-        guard music.playerState() == .playing else {
+        recoverIfNeeded()
+        guard music.playerState() == .playing, let startVolume = music.volume() else {
             music.nextTrack()
             return
         }
@@ -108,8 +89,8 @@ public actor TransitionEngine {
 
         var eqSnapshot: EQSnapshot?
         if settings.eqEffects, eq.prepare() { eqSnapshot = try? eq.snapshot() }
-        begin(StateSnapshot(volume: music.volume(), eq: eqSnapshot))
-        store.save(saved)
+        begin(volume: startVolume, eq: eqSnapshot, isSkip: true)
+        store.save(StateSnapshot(volume: startVolume, eq: eqSnapshot))
 
         let recipe = picker.next(settings: settings, eqAvailable: eqSnapshot != nil, using: &rng)
         lastRecipe = recipe
@@ -127,7 +108,7 @@ public actor TransitionEngine {
             let elapsed = clock.now() - start
             if elapsed >= recipe.length { break }
             let progress = elapsed / recipe.length
-            writeVolume(FadeCurve.volume(start: saved.volume, recipe: recipe, progress: progress))
+            writeVolume(FadeCurve.volume(start: savedVolume, recipe: recipe, progress: progress))
             if sweeping, let eqSnapshot {
                 do {
                     try eq.setBands(FadeCurve.bands(original: eqSnapshot.bands, recipe: recipe, progress: progress))
@@ -141,6 +122,7 @@ public actor TransitionEngine {
         // Skip, and wait for the next song to actually start.
         writeVolume(0)
         music.nextTrack()
+        didSkip = true
         lastSkipAt = clock.now()
         while !(music.playerState() == .playing && music.trackKey() != startKey),
               clock.now() - lastSkipAt < Self.nextTrackTimeout {
@@ -149,19 +131,50 @@ public actor TransitionEngine {
         }
 
         restoreEQ()
-        await fadeVolume(from: 0, to: saved.volume, over: settings.fadeIn)
+        await fadeVolume(from: 0, to: savedVolume, over: settings.fadeIn)
         if let stop = stopReason() { return handle(stop) }
+        finish()
+    }
+
+    public func togglePause(settings: TransitionSettings) async {
+        guard music.isRunning else { return }
+        if isRunning {
+            interrupt = .cancelAndPause
+            return
+        }
+        recoverIfNeeded()
+        let state = music.playerState()
+        guard settings.fadeOnPause, state != .stopped, let startVolume = music.volume() else {
+            if state == .playing { music.pause() } else { music.play() }
+            return
+        }
+
+        begin(volume: startVolume, eq: nil, isSkip: false)
+        store.save(StateSnapshot(volume: startVolume, eq: nil))
+        if state == .playing {
+            await fadeVolume(from: savedVolume, to: 0, over: TransitionSettings.pauseFade)
+            if let stop = stopReason() { return handle(stop) }
+            music.pause()
+        } else {
+            writeVolume(0)
+            music.play()
+            await fadeVolume(from: 0, to: savedVolume, over: TransitionSettings.pauseFade)
+            if let stop = stopReason() { return handle(stop) }
+        }
         finish()
     }
 
     // MARK: - Transition plumbing
 
-    private func begin(_ snapshot: StateSnapshot, isSkip: Bool = true) {
-        saved = snapshot
+    private func begin(volume: Int, eq: EQSnapshot?, isSkip: Bool) {
+        savedVolume = volume
+        savedEQ = eq
         self.isSkip = isSkip
+        didSkip = false
         interrupt = nil
         volumeManaged = true
-        recentVolumes = [snapshot.volume]
+        volumeMismatches = 0
+        recentVolumes = [volume]
         isRunning = true
     }
 
@@ -187,25 +200,32 @@ public actor TransitionEngine {
         case .trackChanged:
             finish()
         case .interrupt(.skip):
-            // A second press means the user is hunting for a song: stop the show and skip.
             plainSkip()
-            searchMode = true
+            if isSkip {
+                // A second press means the user is hunting for a song.
+                didSkip = true
+                searchMode = true
+            }
             finish()
         case .interrupt(.cancelAndPause):
-            finish()
+            // Pause before the volume comes back, so there is no burst of full volume.
             music.pause()
+            finish()
         }
     }
 
     /// Sets the volume unless the user has taken it over.
     private func writeVolume(_ v: Int) {
         guard volumeManaged else { return }
-        let actual = music.volume()
+        // A read that fails says nothing about the user, so it never costs us control.
         // Music can report a write a moment late, so compare against the last few.
-        if !recentVolumes.contains(where: { abs($0 - actual) <= 1 }) {
-            volumeManaged = false
+        if let actual = music.volume(), !recentVolumes.contains(where: { abs($0 - actual) <= 1 }) {
+            // Hold this write; if it still differs on the next one, the user moved it.
+            volumeMismatches += 1
+            if volumeMismatches >= 2 { volumeManaged = false }
             return
         }
+        volumeMismatches = 0
         music.setVolume(v)
         recentVolumes.append(v)
         if recentVolumes.count > 3 { recentVolumes.removeFirst() }
@@ -224,18 +244,29 @@ public actor TransitionEngine {
         }
     }
 
+    /// A failed call drops the controller's cached controls, so one retry goes through prepare().
+    private func restore(_ snapshot: EQSnapshot) -> Bool {
+        if (try? eq.restore(snapshot)) != nil { return true }
+        return eq.prepare() && (try? eq.restore(snapshot)) != nil
+    }
+
     private func restoreEQ() {
-        if let eqSnapshot = saved.eq { try? eq.restore(eqSnapshot) }
-        saved.eq = nil
+        if let snapshot = savedEQ, restore(snapshot) { savedEQ = nil }
     }
 
     /// Puts back whatever is still changed and ends the transition.
     private func finish() {
         restoreEQ()
-        writeVolume(saved.volume)
-        store.clear()
+        writeVolume(savedVolume)
+        // A held write gets one more try, so a single odd read can't leave the volume partway.
+        if volumeMismatches > 0 { writeVolume(savedVolume) }
+        if let unrestored = savedEQ {
+            store.save(StateSnapshot(volume: nil, eq: unrestored))
+        } else {
+            store.clear()
+        }
         interrupt = nil
-        if isSkip { lastTransitionEnd = clock.now() }
+        if didSkip { lastTransitionEnd = clock.now() }
         isRunning = false
     }
 }

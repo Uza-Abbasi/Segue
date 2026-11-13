@@ -37,7 +37,12 @@ final class FakeMusic: MusicControlling, @unchecked Sendable {
     func playerState() -> PlayerState { state }
     func trackKey() -> String? { key }
     func trackTitle() -> (name: String, artist: String)? { key.map { ($0, "Artist") } }
-    func volume() -> Int { vol }
+    /// The next N volume reads fail, as when Music doesn't answer in time.
+    var failVolumeReads = 0
+    func volume() -> Int? {
+        if failVolumeReads > 0 { failVolumeReads -= 1; return nil }
+        return vol
+    }
     func setVolume(_ v: Int) { vol = v; log.append("vol:\(v)") }
     func nextTrack() {
         log.append("next")
@@ -65,19 +70,27 @@ final class FakeEQ: EqualizerControlling, @unchecked Sendable {
     var failAfterSetBandsCalls: Int?
     var setBandsCalls = 0
     var restoreCalls = 0
+    /// Mirrors the real controller: after a failed call its cached controls are gone,
+    /// and nothing works until prepare() finds them again.
+    var stale = false
 
-    func prepare() -> Bool { available }
+    func prepare() -> Bool {
+        if available { stale = false }
+        return available
+    }
     func snapshot() throws -> EQSnapshot { current }
     func setEnabled(_ on: Bool) throws { current.enabled = on }
     func setBands(_ values: [Int: Int]) throws {
         setBandsCalls += 1
-        if let limit = failAfterSetBandsCalls, setBandsCalls >= limit { throw FakeEQError() }
+        if let limit = failAfterSetBandsCalls, setBandsCalls >= limit { stale = true }
+        if stale { throw FakeEQError() }
         for (band, value) in values { current.bands[band] = value }
         // Music relabels any preset as Manual once a slider moves.
         current.preset = "Manual"
     }
     func restore(_ s: EQSnapshot) throws {
         restoreCalls += 1
+        if stale || !available { throw FakeEQError() }
         current = s
     }
 }

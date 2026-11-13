@@ -56,14 +56,14 @@ enum Probe {
         guard music.isRunning else { return }
         print("state: \(music.playerState())")
         print("trackKey: \(music.trackKey() ?? "nil")")
-        let volume = music.volume()
+        let volume = music.volume() ?? 0
         print("volume: \(volume)")
         music.setVolume(volume - 10)
         Thread.sleep(forTimeInterval: 0.5)
-        print("after lowering by 10: \(music.volume())")
+        print("after lowering by 10: \(music.volume() ?? -1)")
         music.setVolume(volume)
         Thread.sleep(forTimeInterval: 0.2)
-        print("after restoring: \(music.volume())")
+        print("after restoring: \(music.volume() ?? -1)")
 
         // How quickly a write shows up in a read, which the engine's user-volume check depends on.
         var stale = 0

@@ -77,7 +77,7 @@ final class MusicAppController: MusicControlling, @unchecked Sendable {
         return "\(track.persistentID ?? "")|\(name)|\(track.artist ?? "")|\(Int(track.duration ?? 0))"
     }
 
-    func volume() -> Int { app?.soundVolume ?? 0 }
+    func volume() -> Int? { app?.soundVolume }
     func setVolume(_ v: Int) { app?.setSoundVolume?(min(max(v, 0), 100)) }
     func nextTrack() { app?.nextTrack?() }
     func pause() { app?.pause?() }

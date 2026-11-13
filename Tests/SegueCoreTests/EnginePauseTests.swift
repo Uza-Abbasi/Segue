@@ -56,6 +56,8 @@ import Testing
     #expect(rig.music.nextCount == 0)
     #expect(rig.music.state == .paused)
     #expect(rig.music.vol == 80)
+    // Paused before the volume comes back, so there is no burst of full volume.
+    #expect(rig.music.log.suffix(2) == ["pause", "vol:80"])
     #expect(rig.eq.current == rock)
     #expect(rig.store.load() == nil)
     #expect(rig.clock.now() < 2.2)
@@ -74,6 +76,17 @@ import Testing
     rig.music.running = false
     await rig.engine.togglePause(settings: fixedSettings)
     #expect(rig.music.log.isEmpty)
+}
+
+@Test func skipDuringAPauseFadeDoesNotStartSearchMode() async {
+    let rig = Rig()
+    rig.clock.at(0.3) { await rig.engine.djSkip(settings: fixedSettings) }
+    await rig.engine.togglePause(settings: fixedSettings)
+    #expect(rig.music.nextCount == 1)
+    #expect(rig.music.vol == 80)
+    rig.clock.advance(1)
+    await rig.engine.djSkip(settings: fixedSettings)
+    #expect(rig.eq.setBandsCalls > 100)
 }
 
 @Test func skipRightAfterResumeIsAFullTransition() async {
