@@ -8,6 +8,9 @@ public actor TransitionEngine {
     public static let searchWindow = 3.0
     /// Seconds without a skip before DJ skips resume.
     public static let searchRelease = 10.0
+    /// Music animates a restored preset into place, and its Equalizer window shows the old
+    /// preset name and slider values until it is done. Measured at about 0.6 s.
+    public static let eqSettleTime = 1.5
 
     private enum Interrupt { case skip, cancelAndPause }
     private enum Stop { case interrupt(Interrupt), trackChanged, musicGone }
@@ -38,6 +41,8 @@ public actor TransitionEngine {
     private var volumeManaged = true
     private var volumeMismatches = 0
     private var recentVolumes: [Int] = []
+    /// The EQ state last put back, and when. Trusted over the window until it has settled.
+    private var lastRestore: (eq: EQSnapshot, at: Double)?
 
     public init(music: MusicControlling, eq: EqualizerControlling, store: SnapshotStore,
                 clock: EngineClock, rng: any RandomNumberGenerator = SystemRandomNumberGenerator()) {
@@ -88,7 +93,7 @@ public actor TransitionEngine {
         searchMode = false
 
         var eqSnapshot: EQSnapshot?
-        if settings.eqEffects, eq.prepare() { eqSnapshot = try? eq.snapshot() }
+        if settings.eqEffects, eq.prepare() { eqSnapshot = settlingEQ() ?? (try? eq.snapshot()) }
         begin(volume: startVolume, eq: eqSnapshot, isSkip: true)
         store.save(StateSnapshot(volume: startVolume, eq: eqSnapshot))
 
@@ -130,8 +135,18 @@ public actor TransitionEngine {
             if let stop = stopReason() { return handle(stop) }
         }
 
-        restoreEQ()
-        await fadeVolume(from: 0, to: savedVolume, over: settings.fadeIn)
+        // The new song comes in through the same filter the old one left by, opening up as it
+        // fades in. finish() then puts the preset and on/off state back.
+        if !sweeping { restoreEQ() }
+        await fadeVolume(from: 0, to: savedVolume, over: settings.fadeIn) { progress in
+            guard sweeping, let eqSnapshot else { return }
+            do {
+                try self.eq.setBands(FadeCurve.bands(original: eqSnapshot.bands, recipe: recipe,
+                                                     progress: 1 - progress))
+            } catch {
+                sweeping = false
+            }
+        }
         if let stop = stopReason() { return handle(stop) }
         finish()
     }
@@ -232,12 +247,15 @@ public actor TransitionEngine {
     }
 
     /// Stops early, leaving the volume wherever it is, if the transition must stop.
-    private func fadeVolume(from: Int, to: Int, over seconds: Double) async {
+    /// `each` runs on every step with the fade's progress, 0 to 1.
+    private func fadeVolume(from: Int, to: Int, over seconds: Double,
+                            each: ((Double) -> Void)? = nil) async {
         let start = clock.now()
         while seconds > 0 {
             if stopReason() != nil { return }
             let elapsed = clock.now() - start
             if elapsed >= seconds { break }
+            each?(elapsed / seconds)
             let level = sin(elapsed / seconds * .pi / 2)
             writeVolume(Int((Double(from) + Double(to - from) * level).rounded()))
             await clock.sleep(Self.tick)
@@ -246,8 +264,17 @@ public actor TransitionEngine {
 
     /// A failed call drops the controller's cached controls, so one retry goes through prepare().
     private func restore(_ snapshot: EQSnapshot) -> Bool {
-        if (try? eq.restore(snapshot)) != nil { return true }
-        return eq.prepare() && (try? eq.restore(snapshot)) != nil
+        guard (try? eq.restore(snapshot)) != nil
+                || (eq.prepare() && (try? eq.restore(snapshot)) != nil) else { return false }
+        lastRestore = (snapshot, clock.now())
+        return true
+    }
+
+    /// The state a restore is still moving the Equalizer towards, if one just happened.
+    /// Reading the window now would save the swept sliders as if they were the user's own.
+    private func settlingEQ() -> EQSnapshot? {
+        guard let lastRestore, clock.now() - lastRestore.at < Self.eqSettleTime else { return nil }
+        return lastRestore.eq
     }
 
     private func restoreEQ() {

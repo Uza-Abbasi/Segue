@@ -1,9 +1,10 @@
 import AppKit
 import ApplicationServices
+import os
 import SegueCore
 
 enum EQError: Error {
-    case noPermission, windowUnavailable, controlMissing(String)
+    case noPermission, windowUnavailable, controlMissing(String), notApplied
 }
 
 /// Drives Music's Equalizer window through the Accessibility API.
@@ -13,6 +14,8 @@ final class AXEqualizerController: EqualizerControlling, @unchecked Sendable {
     static let bandLabels = ["32 hertz", "64 hertz", "125 hertz", "250 hertz", "500 hertz",
                              "1 kilohertz", "2 kilohertz", "4 kilohertz", "8 kilohertz", "16 kilohertz"]
     private static let windowTitle = "Equalizer"
+    /// See these with: log show --last 1h --predicate 'subsystem == "io.github.segue.Segue"'
+    private static let log = Logger(subsystem: "io.github.segue.Segue", category: "equalizer")
 
     private let lock = NSRecursiveLock()
     private var sliders: [AXUIElement] = []
@@ -74,9 +77,11 @@ final class AXEqualizerController: EqualizerControlling, @unchecked Sendable {
         guard let checkbox, let presetButton, sliders.count == Self.bandLabels.count else {
             throw EQError.windowUnavailable
         }
-        return EQSnapshot(enabled: try number(checkbox) != 0,
-                          preset: string(presetButton, kAXValueAttribute) ?? "Manual",
-                          bands: try sliders.map { Int(try number($0).rounded()) })
+        let s = EQSnapshot(enabled: try number(checkbox) != 0,
+                           preset: string(presetButton, kAXValueAttribute) ?? "Manual",
+                           bands: try sliders.map { Int(try number($0).rounded()) })
+        Self.log.notice("saved: on=\(s.enabled) preset=\(s.preset, privacy: .public) bands=\(s.bands, privacy: .public)")
+        return s
     }
 
     func setEnabled(_ on: Bool) throws {
@@ -102,10 +107,29 @@ final class AXEqualizerController: EqualizerControlling, @unchecked Sendable {
     func restore(_ s: EQSnapshot) throws {
         lock.lock()
         defer { lock.unlock() }
-        if s.preset == "Manual" || !selectPreset(s.preset) {
-            try setBands(Dictionary(uniqueKeysWithValues: s.bands.enumerated().map { ($0.offset, $0.element) }))
+        do {
+            if s.preset == "Manual" || !selectPreset(s.preset) {
+                // Music accepts a write and can still not apply it, so read the sliders back.
+                let target = Dictionary(uniqueKeysWithValues: s.bands.enumerated().map { ($0.offset, $0.element) })
+                try setBands(target)
+                if try !bandsMatch(s.bands) {
+                    try setBands(target)
+                    guard try bandsMatch(s.bands) else {
+                        invalidate()
+                        throw EQError.notApplied
+                    }
+                }
+            }
+            try setEnabled(s.enabled)
+            Self.log.notice("restored: preset=\(s.preset, privacy: .public) bands=\(s.bands, privacy: .public)")
+        } catch {
+            Self.log.error("restore failed (\(String(describing: error), privacy: .public)): preset=\(s.preset, privacy: .public)")
+            throw error
         }
-        try setEnabled(s.enabled)
+    }
+
+    private func bandsMatch(_ bands: [Int]) throws -> Bool {
+        try zip(sliders, bands).allSatisfy { abs(try number($0) - Double($1)) <= 25 }
     }
 
     // MARK: - Accessibility plumbing
@@ -140,7 +164,14 @@ final class AXEqualizerController: EqualizerControlling, @unchecked Sendable {
             }
             return false
         }
-        return AXUIElementPerformAction(item, kAXPressAction as CFString) == .success
+        guard AXUIElementPerformAction(item, kAXPressAction as CFString) == .success else { return false }
+        // A press can report success without the preset taking, so wait for the pop-up to show it.
+        for _ in 0..<15 {
+            if string(presetButton, kAXValueAttribute) == name { return true }
+            Thread.sleep(forTimeInterval: 0.03)
+        }
+        Self.log.error("preset \(name, privacy: .public) was picked but did not take")
+        return false
     }
 
     private func equalizerWindow(of app: AXUIElement) -> AXUIElement? {

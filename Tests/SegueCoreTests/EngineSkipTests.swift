@@ -155,3 +155,27 @@ final class Box<T>: @unchecked Sendable {
     #expect(first?.focus != second?.focus)
     #expect(first?.fadeTarget != second?.fadeTarget)
 }
+
+@Test func nextSongFadesInFromTheSweptEQ() async {
+    let rig = Rig()
+    rig.eq.current = rock
+    let lows = Box<[Int]>([])
+    for t in [5.6, 6.0, 6.4, 6.8] { rig.clock.at(t) { lows.value.append(rig.eq.current.bands[0]) } }
+    await rig.engine.djSkip(settings: fixedSettings)
+    #expect(lows.value.count == 4)
+    #expect(lows.value[0] < -900)                 // still filtered as the new song starts
+    #expect(isNonDecreasing(lows.value))
+    #expect(lows.value[3] > lows.value[0] + 300)
+    #expect(lows.value[3] < 50)                   // not back yet before the fade-in ends
+    #expect(rig.eq.current == rock)
+}
+
+@Test func eqSnapsBackWhenThereIsNoFadeIn() async {
+    let rig = Rig()
+    rig.eq.current = rock
+    var settings = fixedSettings
+    settings.fadeIn = 0
+    await rig.engine.djSkip(settings: settings)
+    #expect(rig.eq.current == rock)
+    #expect(rig.music.vol == 80)
+}

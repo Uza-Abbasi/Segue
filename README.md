@@ -2,7 +2,7 @@
 
 A macOS menu bar app that makes skipping a song in Apple Music sound like a DJ transition.
 
-Press a shortcut and, instead of cutting the song off, Segue fades it out while sweeping the equalizer, skips, and fades the next song in. Each skip uses a different combination of fade and filter, so no two sound the same. Afterwards your volume and equalizer go back to how you left them.
+Press a shortcut and, instead of cutting the song off, Segue fades it out while sweeping the equalizer, skips, and fades the next song in through the same filter, opening it back up as the volume rises. Each skip uses a different combination of fade and filter, so no two sound the same. Afterwards your volume and equalizer go back to how you left them.
 
 This is a personal proof of concept. It is a rough beta.
 

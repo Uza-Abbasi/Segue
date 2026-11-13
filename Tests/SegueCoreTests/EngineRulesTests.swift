@@ -213,3 +213,40 @@ import Testing
     #expect(rig.music.log.isEmpty)
     #expect(rig.eq.restoreCalls == 0)
 }
+
+// Music animates a preset back for about half a second, and its window reads stale meanwhile.
+@Test func skipRightAfterARestoreDoesNotSaveTheSweptEQ() async {
+    let rig = Rig()
+    rig.eq.current = rock
+    rig.eq.readsLagRestore = true
+    rig.clock.at(2.0) { rig.music.key = "other" }
+    await rig.engine.djSkip(settings: fixedSettings)      // aborted: EQ restored at about 2 s
+    await rig.engine.djSkip(settings: fixedSettings)      // pressed again straight away
+    #expect(rig.music.nextCount == 1)
+    #expect(rig.eq.current == rock)
+}
+
+@Test func skipRightAfterRecoveryDoesNotSaveTheSweptEQ() async {
+    let rig = Rig()
+    var swept = rock
+    swept.preset = "Manual"
+    swept.bands[0] = -1184
+    rig.eq.current = swept
+    rig.eq.readsLagRestore = true
+    rig.store.save(StateSnapshot(volume: nil, eq: rock))
+    await rig.engine.djSkip(settings: fixedSettings)
+    #expect(rig.eq.current == rock)
+}
+
+@Test func eqIsReadAfreshOnceARestoreHasSettled() async {
+    let rig = Rig()
+    rig.eq.current = rock
+    rig.clock.at(2.0) { rig.music.key = "other" }
+    await rig.engine.djSkip(settings: fixedSettings)
+    rig.clock.advance(TransitionEngine.eqSettleTime + 0.1)
+    var mine = rock
+    mine.preset = "Jazz"
+    rig.eq.current = mine                                 // the user picked another preset
+    await rig.engine.djSkip(settings: fixedSettings)
+    #expect(rig.eq.current == mine)
+}

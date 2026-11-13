@@ -78,7 +78,10 @@ final class FakeEQ: EqualizerControlling, @unchecked Sendable {
         if available { stale = false }
         return available
     }
-    func snapshot() throws -> EQSnapshot { current }
+    /// Mirrors Music: for a moment after a restore, the window still shows the old values.
+    var readsLagRestore = false
+    var lagging: EQSnapshot?
+    func snapshot() throws -> EQSnapshot { lagging ?? current }
     func setEnabled(_ on: Bool) throws { current.enabled = on }
     func setBands(_ values: [Int: Int]) throws {
         setBandsCalls += 1
@@ -91,6 +94,7 @@ final class FakeEQ: EqualizerControlling, @unchecked Sendable {
     func restore(_ s: EQSnapshot) throws {
         restoreCalls += 1
         if stale || !available { throw FakeEQError() }
+        if readsLagRestore { lagging = current }
         current = s
     }
 }

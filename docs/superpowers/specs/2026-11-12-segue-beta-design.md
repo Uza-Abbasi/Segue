@@ -97,8 +97,8 @@ If EQ effects are off or the equalizer is unavailable, EQ focus is always "none"
 3. If the recipe uses EQ and the EQ is off, turn it on.
 4. Over the recipe's length, about 30 times a second, timed against the clock: set the volume along the fade shape toward the fade target, and move the focus sliders toward their depth.
 5. Set volume to 0 and send next track. Wait until the new track is playing (up to 5 s).
-6. Restore the sliders, the preset and the EQ on/off state.
-7. Fade the volume from 0 to the saved level over the fade-in length.
+6. Over the fade-in length, fade the volume from 0 to the saved level and move the focus sliders from their swept values back to the saved ones, so the next song comes in through the same filter (changed 2026-11-13; the sliders used to snap back before the fade-in).
+7. Restore the preset and the EQ on/off state.
 8. Delete the snapshot from disk.
 
 ### Faded pause / resume
