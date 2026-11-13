@@ -9,7 +9,7 @@ public actor TransitionEngine {
     /// Seconds without a skip before DJ skips resume.
     public static let searchRelease = 10.0
 
-    private enum Interrupt { case skip }
+    private enum Interrupt { case skip, cancelAndPause }
     private enum Stop { case interrupt(Interrupt), trackChanged, musicGone }
 
     private let music: MusicControlling
@@ -34,6 +34,7 @@ public actor TransitionEngine {
     private var interrupt: Interrupt?
     private var volumeManaged = true
     private var recentVolumes: [Int] = []
+    private var isSkip = true
 
     public init(music: MusicControlling, eq: EqualizerControlling, store: SnapshotStore,
                 clock: EngineClock, rng: any RandomNumberGenerator = SystemRandomNumberGenerator()) {
@@ -54,6 +55,33 @@ public actor TransitionEngine {
         music.setVolume(snapshot.volume)
         if let eqSnapshot = snapshot.eq, eq.prepare() { try? eq.restore(eqSnapshot) }
         store.clear()
+    }
+
+    public func togglePause(settings: TransitionSettings) async {
+        guard music.isRunning else { return }
+        if isRunning {
+            interrupt = .cancelAndPause
+            return
+        }
+        let state = music.playerState()
+        guard settings.fadeOnPause, state != .stopped else {
+            if state == .playing { music.pause() } else { music.play() }
+            return
+        }
+
+        // Pause fades are too short to be worth a snapshot on disk.
+        begin(StateSnapshot(volume: music.volume(), eq: nil), isSkip: false)
+        if state == .playing {
+            await fadeVolume(from: saved.volume, to: 0, over: TransitionSettings.pauseFade)
+            if let stop = stopReason() { return handle(stop) }
+            music.pause()
+        } else {
+            writeVolume(0)
+            music.play()
+            await fadeVolume(from: 0, to: saved.volume, over: TransitionSettings.pauseFade)
+            if let stop = stopReason() { return handle(stop) }
+        }
+        finish()
     }
 
     public func djSkip(settings: TransitionSettings) async {
@@ -128,8 +156,9 @@ public actor TransitionEngine {
 
     // MARK: - Transition plumbing
 
-    private func begin(_ snapshot: StateSnapshot) {
+    private func begin(_ snapshot: StateSnapshot, isSkip: Bool = true) {
         saved = snapshot
+        self.isSkip = isSkip
         interrupt = nil
         volumeManaged = true
         recentVolumes = [snapshot.volume]
@@ -162,6 +191,9 @@ public actor TransitionEngine {
             plainSkip()
             searchMode = true
             finish()
+        case .interrupt(.cancelAndPause):
+            finish()
+            music.pause()
         }
     }
 
@@ -203,7 +235,7 @@ public actor TransitionEngine {
         writeVolume(saved.volume)
         store.clear()
         interrupt = nil
-        lastTransitionEnd = clock.now()
+        if isSkip { lastTransitionEnd = clock.now() }
         isRunning = false
     }
 }
