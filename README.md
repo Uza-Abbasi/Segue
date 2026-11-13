@@ -61,6 +61,27 @@ Segue asks for two permissions:
 - **Automation (control Music):** macOS prompts the first time Segue talks to Music. Needed for everything.
 - **Accessibility:** click "Grant Accessibility access" in Segue's panel. Needed for the equalizer sweep. Without it, skips still fade.
 
+## Troubleshooting
+
+**Skips fade but the equalizer doesn't move, usually after a rebuild.** With the default ad hoc signing, macOS treats each rebuild as a different app. The Segue entry under Accessibility still looks switched on, but it no longer matches, and switching it off and on doesn't help. Segue's panel shows "Grant Accessibility access" when this has happened.
+
+1. Clear the stale entry:
+
+   ```bash
+   tccutil reset Accessibility io.github.segue.Segue
+   ```
+
+2. Click "Grant Accessibility access" in Segue's panel and switch Segue on in System Settings → Privacy & Security → Accessibility.
+3. Reopen the panel. The button should be gone.
+
+To check the sweep, open Music's Window → Equalizer and watch the sliders during a DJ skip.
+
+If Segue can no longer control Music at all after a rebuild, reset that permission the same way and allow it again when macOS asks:
+
+```bash
+tccutil reset AppleEvents io.github.segue.Segue
+```
+
 ## Using it
 
 | Shortcut | Action |
@@ -99,6 +120,7 @@ Settings in the panel: shortest and longest transition, vary each transition, eq
 - Jump to the outro before fading
 - Loops
 - Better shuffle and an AI-music filter
+- A ready-to-run app download, so building from source isn't needed
 
 ## License
 
